@@ -1,0 +1,2220 @@
+---
+title: "Israeli Mortality"
+author: "Michal Bitan and David Steinberg"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r,echo=F,warning=F,message=F}
+
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE, message=F, warning=F, fig.width = 8, fig.show="all")
+#install the packages if necessary
+if(!require("tidyverse")) install.packages("tidyverse")
+if(!require("fs")) install.packages("fs")
+if(!require("readxl")) install.packages("readxl")
+if(!require("pander")) install.packages("pander")
+library(xlsx) # read excel file
+library(reshape2) #for converting to long dataframe with melt
+
+library(rmarkdown)
+library(ggplot2)
+library(gam)
+library(mgcv)
+library(zoo)
+
+options(scipen=999) #turn off the sientific mode e+-X
+theme_set(theme_bw())
+
+```
+
+```{r}
+# Counting days from 1 (1 January 2000) to the final year of interest, find the count for 2 July in each year.  
+
+dayOfYear<-function(year)
+{
+  n.years<-year-2000
+  if(year %% 4 == 0)
+  {
+    index<-365*n.years+n.years/4+184
+  }
+  else
+  {
+    index<-365*n.years+floor(n.years/4)+184
+#    index<-365*n.years+round(n.years/4)+1+183
+  }
+  return (index)
+}
+
+popYear<-function(y, data, pop.yr, population)
+{
+  
+  index<-dayOfYear(y)
+  data$population.size[data$day.Index == index]<-pop.yr[y-2000+1]
+  data$population.age.0.19[data$day.Index == index]<-(population %>% filter(age.group==1&year==y)) $ population
+  data$population.age.20.59[data$day.Index == index]<-(population %>% filter(age.group==2&year==y)) $ population
+  data$population.age.60.69[data$day.Index == index]<-(population %>% filter(age.group==3&year==y)) $ population
+  data$population.age.70.79[data$day.Index == index]<-(population %>% filter(age.group==4&year==y)) $ population
+  data$population.age.80.89[data$day.Index == index]<-(population %>% filter(age.group==5&year==y)) $ population
+  data$population.age.90[data$day.Index == index]<-(population %>% filter(age.group==6&year==y)) $ population
+  return (data)
+}
+```
+
+
+
+```{r}
+
+# Read in data files.
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\All Years")
+
+mortality <- read.csv("mortality_2000_2021_29_june_holiday.csv",header=TRUE)
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\Meteorology\\April 18 2021")
+
+weather <- read.csv("weather_18_april_all_mar2021.csv",header=TRUE)
+
+# mortality <- read.csv("mortality_2000_2020_25_june.csv",header=TRUE)
+
+# weather <- read.csv("C:/Users/micha/Dropbox/Climate and covid-19/Data/Meteorology/weather_25_june.csv",header=TRUE)
+
+alldata <- merge(mortality,weather,"DayID",all.x = TRUE, all.y = TRUE)
+
+attach(alldata)
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\CBS\\Population CBS")
+
+population <- read.xlsx("population_2000_2018_29_june.xlsx", sheetIndex=1)
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\CBS\\Covid morbidity")
+
+covid.cases <- read.csv("cases_by_age_10_may.csv", header = TRUE)
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\ICDC\\April 20 2021")
+
+ili.dat <- read.csv("ILI_2000_2020_3Age-groups_up2021w15.csv",header=TRUE)
+
+
+```
+
+
+
+```{r,echo=F,warning=F,message=F}
+
+# Additional variable definitions.
+
+Year <- Year.y
+
+n.weeks <- floor(length(Year)/7)
+rem.days <- length(Year)-7*n.weeks
+
+if(rem.days==0){
+  Day <- c(rep(seq(0,6,1),n.weeks))
+}
+if(rem.days>0){
+  Day <- c(rep(seq(0,6,1),n.weeks),seq(0,6,1)[1:rem.days])
+}
+
+Year.fit <- Year-2000
+Year.fit.2011 <- (Year.fit-11)*(Year.fit>11)
+Year.fit.2010 <- (Year.y-2010)*(Year.y>2010)
+
+count.na <- sum(is.na(day.Index))
+if(count.na > 0)
+{day.Index[is.na(day.Index)==TRUE] <- seq(length(Year)-count.na+1,length(Year),1)}
+
+alldata$day.Index <- day.Index
+
+count.na.2 <- sum(is.na(DayCnt))
+if(count.na.2 > 0) {
+DayCnt[is.na(DayCnt)==TRUE] <- DayCnt[length(Year)-count.na.2]+seq(1,count.na.2,1)
+}
+
+alldata$DayCnt <- DayCnt
+
+
+sel.Temp <- (is.na(weather$TempMax)==FALSE)
+
+Temp.avg <- (weather$TempMax[sel.Temp]+weather$TempMin[sel.Temp])/2
+
+ntemp <- length(weather$TempMax)
+
+Temp.avg.summer <- Temp.avg*((DayCnt[1:ntemp][sel.Temp]<93)+(DayCnt[1:ntemp][sel.Temp]>335))
+
+Temp.avg.winter <- Temp.avg*((DayCnt[1:ntemp][sel.Temp]>153)*(DayCnt[1:ntemp][sel.Temp]<244))
+
+Temp.avg.shoulder <- Temp.avg*((DayCnt[1:ntemp][sel.Temp]>243)*(DayCnt[1:ntemp][sel.Temp]<336)+(DayCnt[1:ntemp][sel.Temp]>92)*(DayCnt[1:ntemp][sel.Temp]<154))
+
+Temp.avg.fall <- Temp.avg*((DayCnt>92)*(DayCnt<154))
+
+Temp.avg.spring <- Temp.avg*((DayCnt>243)*(DayCnt<336))
+
+
+Temp.max.summer <- TempMax*((DayCnt<93)+(DayCnt>335))
+
+
+Temp.max.winter <- TempMax*((DayCnt>153)*(DayCnt<244))
+
+
+Temp.max.shoulder <- TempMax*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.max.fall <- TempMax*((DayCnt>92)*(DayCnt<154))
+
+Temp.max.spring <- TempMax*((DayCnt>243)*(DayCnt<336))
+
+
+Temp.min.summer <- TempMin*((DayCnt<93)+(DayCnt>335))
+
+Temp.min.winter <- TempMin*((DayCnt>153)*(DayCnt<244))
+
+Temp.min.shoulder <- TempMin*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.min.fall <- TempMin*((DayCnt>92)*(DayCnt<154))
+
+Temp.min.spring <- TempMin*((DayCnt>243)*(DayCnt<336))
+
+
+RadAvg.summer <- RadAvg*((DayCnt<93)+(DayCnt>335))
+
+RadAvg.winter <- RadAvg*((DayCnt>153)*(DayCnt<244))
+
+RadAvg.shoulder <- RadAvg*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+RadAvg.fall <- RadAvg*((DayCnt>92)*(DayCnt<154))
+
+RadAvg.spring <- RadAvg*((DayCnt>243)*(DayCnt<336))
+
+
+RH12.summer <- RH12*((DayCnt<93)+(DayCnt>335))
+
+RH12.winter <- RH12*((DayCnt>153)*(DayCnt<244))
+
+RH12.shoulder <- RH12*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+RH12.fall <- RH12*((DayCnt>92)*(DayCnt<154))
+
+RH12.spring <- RH12*((DayCnt>243)*(DayCnt<336))
+
+Del.Temp.max.summer <- DelTempMax*((DayCnt<93)+(DayCnt>335))
+
+Del.Temp.max.winter <- DelTempMax*((DayCnt>153)*(DayCnt<244))
+
+Del.Temp.max.shoulder <- DelTempMax*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Del.Temp.min.summer <- DelTempMin*((DayCnt<93)+(DayCnt>335))
+
+Del.Temp.min.winter <- DelTempMin*((DayCnt>153)*(DayCnt<244))
+
+Del.Temp.min.shoulder <- DelTempMin*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+# The code below was applied to the original file with ILI data for small age bins.  With the move to the combined ILI data over much broader age bins, the code is no longer needed.
+
+# ili.rate0_19 <- ili.dat$A0_4+ili.dat$A5_14+ili.dat$A15_19
+# ili.rate20_54 <- ili.dat$A20_24+ili.dat$A25_29+ili.dat$A30_34+ili.dat$A35_44+ili.dat$A45_54
+# ili.rate55 <- ili.dat$A55_64+ili.dat$A65_74+ili.dat$A75
+
+# cor(cbind(ili.rate0_19,ili.rate20_54,ili.rate55))
+
+# plot((ili.dat$year-2000)*100+ili.dat$week,ili.rate0_19)
+
+# pairs(cbind(ili.rate0_19,ili.rate20_54,ili.rate55))
+
+# The two adult groups are in very good sync as to when the rate is high or low.  The young group is not completely in sync.  So for mortality seems best to leave out that group in fitting models.
+
+# ili.rate20 <- ili.rate20_54+ili.rate55
+
+# plot(ili.dat$week,ili.rate20)
+
+
+
+# To convert the ili rates to a daily basis, I apply each weekly rate to 7 days, beginning with 3 Jan 2000.  That means the weekly data for 2019 run until a couple days short of the end of December 2019 and this exactly matches the dates used by Naama and Tali for defining what is the "epidemiological week".  For the first two days of Jan 2000, I repeat the value for 3-9 Jan 2000.
+# Note that the revised ILI file with 3 age bins has 1079 weeks of data, so covers more days than the current mortality file.
+
+ili.0_19.day.level.1.2 <- rep(ili.dat$X0_19[1],2)
+ili.0_19.day.level <- c(ili.0_19.day.level.1.2,kronecker(ili.dat$X0_19,rep(1,7)))
+
+ili.20_59.day.level.1.2 <- rep(ili.dat$X20_59[1],2)
+ili.20_59.day.level <- c(ili.20_59.day.level.1.2,kronecker(ili.dat$X20_59,rep(1,7)))
+
+ili.60.day.level.1.2 <- rep(ili.dat$X60[1],2)
+ili.60.day.level <- c(ili.60.day.level.1.2,kronecker(ili.dat$X60,rep(1,7)))
+
+
+TD3.summer <- TD3*((DayCnt<93)+(DayCnt>335))
+
+TD3.winter <- TD3*((DayCnt>153)*(DayCnt<244))
+
+TD3.shoulder <- TD3*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+
+
+TD12.summer <- TD12*((DayCnt<93)+(DayCnt>335))
+
+TD12.winter <- TD12*((DayCnt>153)*(DayCnt<244))
+
+TD12.shoulder <- TD12*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+
+
+vd3.summer <- vapor.den3*((DayCnt<93)+(DayCnt>335))
+
+vd3.winter <- vapor.den3*((DayCnt>153)*(DayCnt<244))
+
+vd3.shoulder <- vapor.den3*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+
+vd12.summer <- vapor.den12*((DayCnt<93)+(DayCnt>335))
+
+vd12.winter <- vapor.den12*((DayCnt>153)*(DayCnt<244))
+
+vd12.shoulder <- vapor.den12*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+
+# Lagged temperature variables.  The 1.4 at the end of the names indicates an average beginning 1 day before the current day and ending 4 days before the current day.  The 1.10 denotes a 10 day average.  Radiation is the only variable of those with lags here that has missing values in the baseline data.  So the averaging is done for radiation to include all days in the time window that do have data, ignoring days that are missing.  This will minimize the number of days that drop due to missing data.  Otherwise, a missing day will affect all days to which it should contribute to the lagged average.
+
+Temp.max.1.4 <- c(0,0,0,0,0.25*(TempMax[1:(ntemp-4)]+TempMax[2:(ntemp-3)]+TempMax[3:(ntemp-2)]+TempMax[4:(ntemp-1)]))
+
+Temp.max.summer.1.4 <- Temp.max.1.4*((DayCnt<93)+(DayCnt>335))
+
+
+Temp.max.winter.1.4 <- Temp.max.1.4*((DayCnt>153)*(DayCnt<244))
+
+
+Temp.max.shoulder.1.4 <- Temp.max.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.max.fall.1.4 <- Temp.max.1.4*((DayCnt>92)*(DayCnt<154))
+
+Temp.max.spring.1.4 <- Temp.max.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+
+Temp.min.1.4 <- c(0,0,0,0,0.25*(TempMin[1:(ntemp-4)]+TempMin[2:(ntemp-3)]+TempMin[3:(ntemp-2)]+TempMin[4:(ntemp-1)]))
+
+Temp.min.summer.1.4 <- Temp.min.1.4*((DayCnt<93)+(DayCnt>335))
+
+Temp.min.winter.1.4 <- Temp.min.1.4*((DayCnt>153)*(DayCnt<244))
+
+Temp.min.shoulder.1.4 <- Temp.min.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.min.fall.1.4 <- Temp.min.1.4*((DayCnt>92)*(DayCnt<154))
+
+Temp.min.spring.1.4 <- Temp.min.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+
+TD3.1.4 <- c(0,0,0,0,0.25*(TD3[1:(ntemp-4)]+TD3[2:(ntemp-3)]+TD3[3:(ntemp-2)]+TD3[4:(ntemp-1)]))
+
+TD3.summer.1.4 <- TD3.1.4*((DayCnt<93)+(DayCnt>335))
+
+
+TD3.winter.1.4 <- TD3.1.4*((DayCnt>153)*(DayCnt<244))
+
+
+TD3.shoulder.1.4 <- TD3.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+TD3.fall.1.4 <- TD3.1.4*((DayCnt>92)*(DayCnt<154))
+
+TD3.spring.1.4 <- TD3.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+RadAvgFull <- RadAvg
+RadAvgFull[is.na(RadAvg)==TRUE] <- 0
+
+RadAvgN.1.4 <- 4-c((is.na(RadAvg[1:(ntemp-4)])+is.na(RadAvg[2:(ntemp-3)])+is.na(RadAvg[3:(ntemp-2)])+is.na(RadAvg[4:(ntemp-1)])))
+
+RadAvg.1.4 <- c(0,0,0,0,(RadAvgFull[1:(ntemp-4)]+RadAvgFull[2:(ntemp-3)]+RadAvgFull[3:(ntemp-2)]+RadAvgFull[4:(ntemp-1)])/RadAvgN.1.4)
+
+RadAvg.summer.1.4 <- RadAvg.1.4*((DayCnt<93)+(DayCnt>335))
+
+
+RadAvg.winter.1.4 <- RadAvg.1.4*((DayCnt>153)*(DayCnt<244))
+
+
+RadAvg.shoulder.1.4 <- RadAvg.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+RadAvg.fall.1.4 <- RadAvg.1.4*((DayCnt>92)*(DayCnt<154))
+
+RadAvg.spring.1.4 <- RadAvg.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+DelTemp.max.1.4 <- c(0,0,0,0,0.25*(DelTempMax[1:(ntemp-4)]+DelTempMax[2:(ntemp-3)]+DelTempMax[3:(ntemp-2)]+DelTempMax[4:(ntemp-1)]))
+
+DelTemp.max.summer.1.4 <- DelTemp.max.1.4*((DayCnt<93)+(DayCnt>335))
+
+
+DelTemp.max.winter.1.4 <- DelTemp.max.1.4*((DayCnt>153)*(DayCnt<244))
+
+
+DelTemp.max.shoulder.1.4 <- DelTemp.max.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+DelTemp.max.fall.1.4 <- DelTemp.max.1.4*((DayCnt>92)*(DayCnt<154))
+
+DelTemp.max.spring.1.4 <- DelTemp.max.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+DelTempSD.max.1.4 <- c(0,0,0,0,0.25*(DelTempMaxSD[1:(ntemp-4)]+DelTempMaxSD[2:(ntemp-3)]+DelTempMaxSD[3:(ntemp-2)]+DelTempMaxSD[4:(ntemp-1)]))
+
+DelTempSD.max.summer.1.4 <- DelTempSD.max.1.4*((DayCnt<93)+(DayCnt>335))
+
+
+DelTempSD.max.winter.1.4 <- DelTempSD.max.1.4*((DayCnt>153)*(DayCnt<244))
+
+
+DelTempSD.max.shoulder.1.4 <- DelTempSD.max.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+DelTempSD.max.fall.1.4 <- DelTempSD.max.1.4*((DayCnt>92)*(DayCnt<154))
+
+DelTempSD.max.spring.1.4 <- DelTempSD.max.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+
+DelTemp.min.1.4 <- c(0,0,0,0,0.25*(DelTempMin[1:(ntemp-4)]+DelTempMin[2:(ntemp-3)]+DelTempMin[3:(ntemp-2)]+DelTempMin[4:(ntemp-1)]))
+
+DelTemp.min.summer.1.4 <- DelTemp.min.1.4*((DayCnt<93)+(DayCnt>335))
+
+DelTemp.min.winter.1.4 <- DelTemp.min.1.4*((DayCnt>153)*(DayCnt<244))
+
+DelTemp.min.shoulder.1.4 <- DelTemp.min.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+DelTemp.min.fall.1.4 <- DelTemp.min.1.4*((DayCnt>92)*(DayCnt<154))
+
+DelTemp.min.spring.1.4 <- DelTemp.min.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+DelTempSD.min.1.4 <- c(0,0,0,0,0.25*(DelTempMinSD[1:(ntemp-4)]+DelTempMinSD[2:(ntemp-3)]+DelTempMinSD[3:(ntemp-2)]+DelTempMinSD[4:(ntemp-1)]))
+
+DelTempSD.min.summer.1.4 <- DelTempSD.min.1.4*((DayCnt<93)+(DayCnt>335))
+
+DelTempSD.min.winter.1.4 <- DelTempSD.min.1.4*((DayCnt>153)*(DayCnt<244))
+
+DelTempSD.min.shoulder.1.4 <- DelTempSD.min.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+DelTempSD.min.fall.1.4 <- DelTempSD.min.1.4*((DayCnt>92)*(DayCnt<154))
+
+DelTempSD.min.spring.1.4 <- DelTempSD.min.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+# The following code relates to the change in Dew Point Temp from period norms.  In the latest data file I did not include those variables, which were no better as predictors than the simple Dew Point Temp.  As a result, the code has also been commented out here.
+
+#TD3.del.1.4 <- c(0,0,0,0,0.25*(TD3.del[1:(ntemp-4)]+TD3.del[2:(ntemp-3)]+TD3.del[3:(ntemp-2)]+TD3.del[4:(ntemp-1)]))
+
+#TD3.del.summer.1.4 <- TD3.del.1.4*((DayCnt<93)+(DayCnt>335))
+
+#TD3.del.winter.1.4 <- TD3.del.1.4*((DayCnt>153)*(DayCnt<244))
+
+#TD3.del.shoulder.1.4 <- TD3.del.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+#TD3.del.fall.1.4 <- TD3.del.1.4*((DayCnt>92)*(DayCnt<154))
+
+#TD3.del.spring.1.4 <- TD3.del.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+#TD3.del.sd.1.4 <- c(0,0,0,0,0.25*(TD3.del.sd[1:(ntemp-4)]+TD3.del.sd[2:(ntemp-3)]+TD3.del.sd[3:(ntemp-2)]+TD3.del.sd[4:(ntemp-1)]))
+
+#TD3.del.sd.summer.1.4 <- TD3.del.sd.1.4*((DayCnt<93)+(DayCnt>335))
+
+#TD3.del.sd.winter.1.4 <- TD3.del.sd.1.4*((DayCnt>153)*(DayCnt<244))
+
+#TD3.del.sd.shoulder.1.4 <- TD3.del.sd.1.4*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+#TD3.del.sd.fall.1.4 <- TD3.del.sd.1.4*((DayCnt>92)*(DayCnt<154))
+
+#TD3.del.sd.spring.1.4 <- TD3.del.sd.1.4*((DayCnt>243)*(DayCnt<336))
+
+
+
+Temp.max.1.10 <- c(0,0,0,0,0,0,0,0,0,0,0.1*(TempMax[1:(ntemp-10)]+TempMax[2:(ntemp-9)]+TempMax[3:(ntemp-8)]+TempMax[4:(ntemp-7)]+TempMax[5:(ntemp-6)]+TempMax[6:(ntemp-5)]+TempMax[7:(ntemp-4)]+TempMax[8:(ntemp-3)]+TempMax[9:(ntemp-2)]+TempMax[10:(ntemp-1)]))
+
+Temp.max.summer.1.10 <- Temp.max.1.10*((DayCnt<93)+(DayCnt>335))
+
+
+Temp.max.winter.1.10 <- Temp.max.1.10*((DayCnt>153)*(DayCnt<244))
+
+
+Temp.max.shoulder.1.10 <- Temp.max.1.10*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.max.fall.1.10 <- Temp.max.1.10*((DayCnt>92)*(DayCnt<154))
+
+Temp.max.spring.1.10 <- Temp.max.1.10*((DayCnt>243)*(DayCnt<336))
+
+
+
+Temp.min.1.10 <- c(0,0,0,0,0,0,0,0,0,0,0.1*(TempMin[1:(ntemp-10)]+TempMin[2:(ntemp-9)]+TempMin[3:(ntemp-8)]+TempMin[4:(ntemp-7)]+TempMin[5:(ntemp-6)]+TempMin[6:(ntemp-5)]+TempMin[7:(ntemp-4)]+TempMin[8:(ntemp-3)]+TempMin[9:(ntemp-2)]+TempMin[10:(ntemp-1)]))
+
+Temp.min.summer.1.10 <- Temp.min.1.10*((DayCnt<93)+(DayCnt>335))
+
+
+Temp.min.winter.1.10 <- Temp.min.1.10*((DayCnt>153)*(DayCnt<244))
+
+
+Temp.min.shoulder.1.10 <- Temp.min.1.10*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+Temp.min.fall.1.10 <- Temp.min.1.10*((DayCnt>92)*(DayCnt<154))
+
+Temp.min.spring.1.10 <- Temp.min.1.10*((DayCnt>243)*(DayCnt<336))
+
+
+
+TD3.1.10 <- c(0,0,0,0,0,0,0,0,0,0,0.1*(TD3[1:(ntemp-10)]+TD3[2:(ntemp-9)]+TD3[3:(ntemp-8)]+TD3[4:(ntemp-7)]+TD3[5:(ntemp-6)]+TD3[6:(ntemp-5)]+TD3[7:(ntemp-4)]+TD3[8:(ntemp-3)]+TD3[9:(ntemp-2)]+TD3[10:(ntemp-1)]))
+
+TD3.summer.1.10 <- TD3.1.10*((DayCnt<93)+(DayCnt>335))
+
+
+TD3.winter.1.10 <- TD3.1.10*((DayCnt>153)*(DayCnt<244))
+
+
+TD3.shoulder.1.10 <- TD3.1.10*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+TD3.fall.1.10 <- TD3.1.10*((DayCnt>92)*(DayCnt<154))
+
+TD3.spring.1.10 <- TD3.1.10*((DayCnt>243)*(DayCnt<336))
+
+
+
+RadAvgFull <- RadAvg
+RadAvgFull[is.na(RadAvg)==TRUE] <- 0
+
+RadAvgN.1.10 <- 10-c((is.na(RadAvg[1:(ntemp-10)])+is.na(RadAvg[2:(ntemp-9)])+is.na(RadAvg[3:(ntemp-8)])+is.na(RadAvg[4:(ntemp-7)])+is.na(RadAvg[5:(ntemp-6)])+is.na(RadAvg[6:(ntemp-5)])+is.na(RadAvg[7:(ntemp-4)])+is.na(RadAvg[8:(ntemp-3)])+is.na(RadAvg[9:(ntemp-2)])+is.na(RadAvg[10:(ntemp-1)])))
+
+RadAvg.1.10 <- c(0,0,0,0,0,0,0,0,0,0,(RadAvgFull[1:(ntemp-10)]+RadAvgFull[2:(ntemp-9)]+RadAvgFull[3:(ntemp-8)]+RadAvgFull[4:(ntemp-7)]+RadAvgFull[5:(ntemp-6)]+RadAvgFull[6:(ntemp-5)]+RadAvgFull[7:(ntemp-4)]+RadAvgFull[8:(ntemp-3)]+RadAvgFull[9:(ntemp-2)]+RadAvgFull[10:(ntemp-1)])/RadAvgN.1.10)
+
+RadAvg.summer.1.10 <- RadAvg.1.10*((DayCnt<93)+(DayCnt>335))
+
+
+RadAvg.winter.1.10 <- RadAvg.1.10*((DayCnt>153)*(DayCnt<244))
+
+
+RadAvg.shoulder.1.10 <- RadAvg.1.10*((DayCnt>243)*(DayCnt<336)+(DayCnt>92)*(DayCnt<154))
+
+RadAvg.fall.1.10 <- RadAvg.1.10*((DayCnt>92)*(DayCnt<154))
+
+RadAvg.spring.1.10 <- RadAvg.1.10*((DayCnt>243)*(DayCnt<336))
+
+
+# Linear spline variables for lagged temperatures in the summer.
+
+Temp.max.summer.1.4.31 <- Temp.max.summer.1.4*(Temp.max.summer.1.4>31)
+
+Temp.min.summer.1.4.24 <- Temp.min.summer.1.4*(Temp.min.summer.1.4>24)
+
+Temp.min.summer.1.4.23 <- Temp.min.summer.1.4*(Temp.min.summer.1.4>23)
+
+
+# Computation of a daily "potential mortality" index during the covid period, by multiplying the number of diseased individuals on that day by rough annual death rates (per 1000) in the years approaching 2020.  Those death rates are 0.29 (0-19), 1.1 (20-59), 8 (60-69), 21 (70-79), 69 (80-89) and 195 (90+).
+# Code below now reflects updated mortality rates (per 100) thru 31 Jan.
+
+covid.cases$index <- 0.004*(covid.cases$Age0+covid.cases$Age1_4+covid.cases$Age5_9+covid.cases$Age10_14+covid.cases$Age15_19)+0.105*(covid.cases$Age20_24+covid.cases$Age25_29+covid.cases$Age30_34+covid.cases$Age35_39+covid.cases$Age40_44+covid.cases$Age45_49+covid.cases$Age50_54+covid.cases$Age55_59)+1.761*(covid.cases$Age60_64+covid.cases$Age65_69)+6.373*(covid.cases$Age70_74+covid.cases$Age75_79)+17.143*(covid.cases$Age80_84+covid.cases$Age85_89)+28.592*covid.cases$Age90p
+
+covid.cases$index.smooth <- rollmean(covid.cases$index,7,fill = NA)
+
+covid.cases$index2 <- 0.004*(covid.cases$Age0+covid.cases$Age1_4+covid.cases$Age5_9+covid.cases$Age10_14+covid.cases$Age15_19)+0.105*(covid.cases$Age20_24+covid.cases$Age25_29+covid.cases$Age30_34+covid.cases$Age35_39+covid.cases$Age40_44+covid.cases$Age45_49+covid.cases$Age50_54+covid.cases$Age55_59)+1.761*(covid.cases$Age60_64+covid.cases$Age65_69)+6.373*(covid.cases$Age70_74+covid.cases$Age75_79)+17.143*(covid.cases$Age80_84+covid.cases$Age85_89)+28.592*(covid.cases$Age90p)
+
+covid.cases$index2.smooth <- rollmean(covid.cases$index2,7,fill = NA)
+
+```
+
+
+
+```{r,echo=F,warning=F,message=F}
+
+# Process population size over time and model total population as a function of time.
+
+
+
+fit.1 <- lm(population ~ day.Index, data=alldata)
+
+summary(fit.1)
+
+ggplot(alldata, aes(y=population, x=day.Index)) +
+  geom_point(aes())+
+  xlab("day index") +
+  ylab("population size")+
+  geom_abline(slope = fit.1$coefficients[2], intercept = fit.1$coefficients[1], colour = "red")
+  
+ 
+
+alldata$population.sizePred.1<-fit.1$coefficients[[1]]+fit.1$coefficients[[2]]*alldata$day.Index #add the prediction of the population by day
+
+alldata$RatePer1M.1<-alldata$Total/alldata$population.sizePred.1*1000000
+
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.1)) +
+  geom_point(aes())+
+  xlab("day index") +
+  ylab("Mortality rate per 1 million")
+
+
+fit.2 <- gam(population ~ s(day.Index), data=alldata)
+
+summary(fit.2)
+
+alldata$population.sizePred.2<-predict(fit.2,alldata)
+
+
+ggplot(alldata, aes(y=population.sizePred.2/10^6, x=day.Index))+
+  geom_line(aes())+
+  xlab("Time") +
+  ylab("Population Size (millions)")+
+  geom_point(data = alldata, aes(x=day.Index, y=population/10^6), colour = "red")
+  
+alldata$RatePer1M.2<-alldata$Total/alldata$population.sizePred.2*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.2)) +
+  geom_point(aes())+
+  xlab("Time") +
+  ylab("Daily Mortality Rate per 1 Million")
+
+
+```
+
+
+```{r}
+
+#alldata<-alldata %>% 
+#  rename(
+#    Year = Year.x
+#    )
+
+alldata$Year <- alldata$Year.x
+
+deaths.yr <- tapply(alldata$Total,alldata$Year,sum)
+
+Deaths.week <- tapply(alldata$Total,alldata$Week,mean) #average deaths per week
+
+alldata$Age20.59 <- alldata$Age20.24+alldata$Age25.29+alldata$Age30.34+alldata$Age35.39+alldata$Age40.44+alldata$Age45.49+alldata$Age50.54+alldata$Age55.59
+
+alldata$Age60.79 <- alldata$Age60.64+alldata$Age65.69+alldata$Age70.74+alldata$Age75.79
+
+alldata$Age80 <- alldata$Age80.84+alldata$Age85.89+alldata$Age90
+
+alldata$Age60.69 <- alldata$Age60.64+alldata$Age65.69
+
+alldata$Age70.79 <- alldata$Age70.74+alldata$Age75.79
+
+alldata$Age80.89 <- alldata$Age80.84+alldata$Age85.89
+
+
+sel.yr <- (is.na(alldata$Year)==FALSE)
+
+population.yr <- tapply(alldata$population.sizePred.2[sel.yr==TRUE],alldata$Year[sel.yr==TRUE],mean)
+
+
+YearlyRatePer1K.2 <- deaths.yr[1:20]/population.yr[1:20]*1000
+
+year.rate.plot <- data.frame(Year=seq(2000,2019,1),Rate=YearlyRatePer1K.2)
+
+ggplot(year.rate.plot, aes(x=Year, y=Rate)) +
+  geom_point(aes())+
+  xlab("Year") +
+  ylab("Annual Mortality Rate per 1 Thousand")
+
+alldata$Month.index <- 20*(alldata$Year-2000)+alldata$Month.x
+
+deaths.month <- tapply(alldata$Total,alldata$Month.index,sum)
+population.month <- tapply(alldata$population.sizePred.2[sel.yr==TRUE], alldata$Month.index[sel.yr==TRUE],mean)
+MonthlyRatePer100K <- deaths.month[1:240]/population.month[1:240]*100000
+
+month.rate.plot <- data.frame(Month=seq(1,240,1),Rate=MonthlyRatePer100K[1:240])
+
+ggplot(month.rate.plot, aes(x=Month, y=Rate)) +
+  geom_point(aes())+
+  xlab("Month") +
+  ylab("Monthly Mortality Rate per 100 Thousand")
+
+
+```
+
+
+
+
+
+```{r}
+# Plot of ILI results for paper.
+
+n.pad <- length(ili.dat$X20_59)-1069
+
+ili.year <- c(rep(0,26),rep(1,52),rep(2,52),rep(3,52),rep(4,52),0,rep(5,52),rep(6,52),rep(7,52),rep(8,52),rep(9,52),0,rep(10,52),rep(11,52),rep(12,52),rep(13,52),rep(14,52),rep(15,52),0,rep(16,52),rep(17,52),rep(18,52),rep(19,52),rep(20,52),rep(0,n.pad))
+
+ili.week <- c(rep(0,26),rep(seq(1:52),4),0,rep(seq(1:52),5),0,rep(seq(1:52),6),0,rep(seq(1:52),5),rep(0,n.pad))
+
+ili.plot <- data.frame(ili.year[ili.year>0],ili.week[ili.year>0],ili.dat$X20_59[ili.year>0])
+
+ggplot(ili.plot, aes(y=ili.dat.X20_59.ili.year...0., x=ili.week.ili.year...0., group=ili.year.ili.year...0.))+
+  geom_line(aes())+
+  xlab("Week") +
+  ylab("ILI Index for Ages 20-59")
+  
+  
+
+
+```
+
+
+according to age groups
+======================
+```{r}
+
+# Population size predictions are done by regular regression of log pop.size  on the day.Index, using a smooth via gam.  This seems to be the best choice for a default model.
+
+fit.2 <- gam(log(population.age.0.19) ~ s(day.Index), data=alldata)
+
+summary(fit.2)
+
+
+alldata$populationPredG1<-exp(predict(fit.2, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+
+alldata$RatePer1M.age.0.19<-alldata$Age0.19/alldata$populationPredG1*1000000
+
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.0.19)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 0-19", x="day index", y = "Mortality rate per 1 milion")
+
+year.rate.0.19 <- (10^6)*tapply(alldata$Age0.19,alldata$Year.x,sum)/tapply(alldata$populationPredG1,alldata$Year.x,mean)
+
+print(year.rate.0.19)
+
+
+fit.2 <- gam(log(population.age.20.59) ~ s(day.Index), data=alldata)
+
+summary(fit.2)
+
+alldata$populationPredG2<-exp(predict(fit.2, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+alldata$RatePer1M.age.20.59<-alldata$Age20.59/alldata$populationPredG2*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.20.59)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 20-59", x="day index", y = "Mortality rate per 1 milion")
+
+year.rate.20.59 <- (10^6)*tapply(alldata$Age20.59,alldata$Year.x,sum)/tapply(alldata$populationPredG2,alldata$Year.x,mean)
+
+print(year.rate.20.59)
+
+  
+
+#linear line is not appropriate therefore smooth curve
+fit.3 <- gam(log(population.age.60.69) ~ s(day.Index), data=alldata)
+summary(fit.3)
+
+alldata$populationPredG3<-exp(predict(fit.3, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+alldata$RatePer1M.age.60.69<-alldata$Age60.69/alldata$populationPredG3*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.60.69)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 60-69", x="day index", y = "Mortality rate per 1 milion")
+
+year.rate.60.69 <- (10^6)*tapply(alldata$Age60.69,alldata$Year.x,sum)/tapply(alldata$populationPredG3,alldata$Year.x,mean)
+
+print(year.rate.60.69)
+
+fit.3 <- gam(log(population.age.70.79) ~ s(day.Index), data=alldata)
+summary(fit.3)
+
+alldata$populationPredG4<-exp(predict(fit.3, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+alldata$RatePer1M.age.70.79<-alldata$Age70.79/alldata$populationPredG4*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.70.79)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 60-69", x="day index", y = "Mortality rate per 1 milion")
+
+year.rate.70.79 <- (10^6)*tapply(alldata$Age70.79,alldata$Year.x,sum)/tapply(alldata$populationPredG4,alldata$Year.x,mean)
+
+print(year.rate.70.79)
+
+
+fit.3 <- gam(log(population.age.80.89) ~ s(day.Index), data=alldata)
+summary(fit.3)
+
+alldata$populationPredG5<-exp(predict(fit.3, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+alldata$RatePer1M.age.80.89<-alldata$Age80.89/alldata$populationPredG5*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.80.89)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 80-89", x="day index", y = "Mortality rate per 1 milion")
+    
+year.rate.80.89 <- (10^6)*tapply(alldata$Age80.89,alldata$Year.x,sum)/tapply(alldata$populationPredG5,alldata$Year.x,mean)  
+
+print(year.rate.80.89)
+
+# For age 90+, the data show a sharp break between 2008 and 2009, evidently the result of adjustments following the 2008 national census. Consequently the analysis here is limited to data from 2009 and on.
+
+fit.3 <- gam(log(population.age.90) ~ s(day.Index), data=alldata, subset = (Year>2008))
+summary(fit.3)
+
+
+alldata$populationPredG6<-exp(predict(fit.3, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+alldata$populationPredG6[alldata$Year<2009] <- NA
+
+alldata$RatePer1M.age.90<-alldata$Age90/alldata$populationPredG6*1000000
+
+ggplot(alldata, aes(x=day.Index, y=RatePer1M.age.90)) +
+  geom_point(aes())+
+  labs (title = "Mortality rate for ages 90+", x="day index", y = "Mortality rate per 1 milion")
+
+year.rate.90 <- (10^6)*tapply(alldata$Age90,alldata$Year.x,sum)/tapply(alldata$populationPredG6,alldata$Year.x,mean)
+
+print(year.rate.90)
+
+# For mortality by cause for those aged 70+ we will want a separate population size model for those aged 70+.  The plot of the raw counts (annual) for this age window has a reasonable appearance for the entire data file, so it can be modeled using all data.
+
+alldata$population.age.70 <- alldata$population.age.70.79+alldata$population.age.80.89+alldata$population.age.90
+
+fit.3 <- gam(log(population.age.70) ~ s(day.Index), data=alldata)
+summary(fit.3)
+
+
+alldata$populationPred.70<-exp(predict(fit.3, subset(alldata, select = c(day.Index)))) #add the prediction of the population by day
+
+
+
+#write the population size prediction to a file
+population.data<-data.frame(DayID=alldata$DayID, Year=alldata$Year, Week=alldata$Week, population.size=alldata$populationPred.70)
+
+write.csv(population.data, "population size 70 and up.csv")
+
+```
+
+
+Separate fits by age group:  Data preparation
+=============================================
+```{r}
+
+# The above fits provide evidence that many of the effects do vary across the age groups.  Therefore it seems wisest, for prediction, to fit separate models to each age group.  These will be done with the  alldata  data frame, using 2000-2019 to build the model and then compute predicted mortality for 2020.
+
+# The first step, given here, is to add the ili data for the 3 age groups to alldata.  This uses the fact that length(Year) gives the length of alldata and we will need the length of the ili data to match.
+
+n.ili <- length(ili.0_19.day.level)
+n.ili.add <- min(c(n.ili),length(Year))
+
+if (n.ili >= length(Year)){
+  alldata$ili.0.19 <- ili.0_19.day.level[1:length(Year)]
+  alldata$ili.20.59 <- ili.20_59.day.level[1:length(Year)]
+  alldata$ili.60 <- ili.60.day.level[1:length(Year)]
+} else {
+  padding <- rep(0,length(Year)-n.ili)
+  alldata$ili.0.19 <- c(ili.0_19.day.level[1:n.ili],padding)
+  alldata$ili.20.59 <- c(ili.20_59.day.level[1:n.ili],padding)
+  alldata$ili.60 <- c(ili.60.day.level[1:n.ili],padding) 
+}
+
+
+# The next step is to add to  alldata  the induced weather variables used in the fit and not included there earlier.
+
+
+alldata$Temp.max.summer.1.10 <- Temp.max.summer.1.10[1:length(Year)]
+alldata$Temp.max.fall.1.10 <- Temp.max.fall.1.10[1:length(Year)]
+alldata$Temp.max.winter.1.10 <- Temp.max.winter.1.10[1:length(Year)]
+alldata$Temp.max.spring.1.10 <- Temp.max.spring.1.10[1:length(Year)]
+
+alldata$Temp.min.summer.1.10 <- Temp.min.summer.1.10[1:length(Year)]
+alldata$Temp.min.fall.1.10 <- Temp.min.fall.1.10[1:length(Year)]
+alldata$Temp.min.winter.1.10 <- Temp.min.winter.1.10[1:length(Year)]
+alldata$Temp.min.spring.1.10 <- Temp.min.spring.1.10[1:length(Year)]
+
+alldata$TD3.summer.1.10 <- TD3.summer.1.10[1:length(Year)]
+alldata$TD3.fall.1.10 <- TD3.fall.1.10[1:length(Year)]
+alldata$TD3.winter.1.10 <- TD3.winter.1.10[1:length(Year)]
+alldata$TD3.spring.1.10 <- TD3.spring.1.10[1:length(Year)]
+
+alldata$RadAvg.summer.1.10 <- RadAvg.summer.1.10[1:length(Year)]
+alldata$RadAvg.fall.1.10 <- RadAvg.fall.1.10[1:length(Year)]
+alldata$RadAvg.winter.1.10 <- RadAvg.winter.1.10[1:length(Year)]
+alldata$RadAvg.spring.1.10 <- RadAvg.spring.1.10[1:length(Year)]
+
+alldata$Day <- Day[1:length(Year)]
+alldata$Year.fit <- Year.fit[1:length(Year)]
+alldata$Year.fit.2010 <- Year.fit.2010[1:length(Year)]
+
+
+```
+
+
+Separate fits by age group:  0-19
+=================================
+```{r}
+
+# The above fits provide evidence that many of the effects do vary across the age groups.  Therefore it seems wisest, for prediction, to fit separate models to each age group.  These will be done with the  alldata  data frame, using 2000-2019 to build the model and then compute predicted mortality for 2020.
+
+fit.rates.0.19.q <- gam(Age0.19 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.0.19, family = quasipoisson, offset = log(populationPredG1), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.0.19.q)
+plot.gam(fit.rates.0.19.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.0.19 <- predict(fit.rates.0.19.q,alldata,se.fit = TRUE)
+pred.mort.0.19 <- exp(pred.0.19$fit)*alldata$populationPredG1
+pred.mort.0.19.se <- pred.mort.0.19*pred.0.19$se.fit
+```
+
+
+Separate fits by age group:  20-59
+==================================
+```{r}
+
+
+fit.rates.20.59.q <- gam(Age20.59 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.20.59, family = quasipoisson, offset = log(populationPredG2), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.20.59.q)
+plot.gam(fit.rates.20.59.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.20.59 <- predict(fit.rates.20.59.q,alldata)
+pred.mort.20.59 <- exp(pred.20.59)*alldata$populationPredG2
+
+
+```
+
+
+Separate fits by age group:  60-69
+==================================
+```{r}
+
+
+fit.rates.60.69.q <- gam(Age60.69 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.60, family = quasipoisson, offset = log(populationPredG3), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.60.69.q)
+plot.gam(fit.rates.60.69.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.60.69 <- predict(fit.rates.60.69.q,alldata)
+pred.mort.60.69 <- exp(pred.60.69)*alldata$populationPredG3
+
+```
+
+
+
+Separate fits by age group:  70-79
+==================================
+```{r}
+
+fit.rates.70.79.q <- gam(Age70.79 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.60, family = quasipoisson, offset = log(populationPredG4), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.70.79.q)
+plot.gam(fit.rates.70.79.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.70.79 <- predict(fit.rates.70.79.q,alldata)
+pred.mort.70.79 <- exp(pred.70.79)*alldata$populationPredG4
+
+```
+
+
+Separate fits by age group:  80-89
+==================================
+```{r}
+
+
+fit.rates.80.89.q <- gam(Age80.89 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.60, family = quasipoisson, offset = log(populationPredG5), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.80.89.q)
+plot.gam(fit.rates.80.89.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.80.89 <- predict(fit.rates.80.89.q,alldata,se.fit = TRUE)
+pred.mort.80.89 <- exp(pred.80.89$fit)*alldata$populationPredG5
+pred.mort.80.89.se <- pred.mort.80.89*pred.80.89$se.fit
+
+```
+
+
+Separate fits by age group:  90-
+==================================
+```{r}
+
+fit.rates.90.q <- gam(Age90 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10+ili.60, family = quasipoisson, offset = log(populationPredG6), data=alldata, subset = ((Year<2020)&(Year>2008)))
+
+summary(fit.rates.90.q)
+plot.gam(fit.rates.90.q,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.90 <- predict(fit.rates.90.q,alldata)
+pred.mort.90 <- exp(pred.90)*alldata$populationPredG6
+
+
+```
+
+
+forecasts of deaths for 2020 and 2021
+=====================================
+```{r}
+
+# The "official" first week of 2020 begins on 30 Dec 2019.  So these results will relate to the predictions for all those days.  A necessary first step is to set up a variable that has length equal to the number of days of predictions and divides them into groups of 7 for defining successive official weeks.  As of 1 Sept, we have 185 days of predictions, which gives us 26 weeks, with 3 days at the end waiting for completion to a week.
+
+# The following two variables give the start and stop day for computing forecasts, in terms of row in the data file.  For 2020, the first day is 30 Dec 2019, which corresponds to row 7304.
+
+# Predictions are computed for epidemiological weeks 1 of 2020 through week 12 of 2021 (28 March).  The variable last.week is defined in the code.
+
+last.week <- 65
+
+start.pred <- 7304
+stop.pred <- 7304+7*last.week-1
+
+# Actual mortality is also computed for each week using the above rows.  However, in some cases we may have actual data at the weekly level but not yet at the daily level.  In that case, the actual mortality will be computed from our data file up to the last week for which we have complete daily data.  The weekly death counts for additional weeks will be added "manually" to the mortality.week vectors.  The following two variables give the limits for computing actual mortality from the daily data.
+
+start.mort <- 7304
+stop.mort <- 7304+7*last.week-1
+
+
+Week.number <- ceiling(seq(1,7*last.week)/7)
+
+# Ages 0-19.
+
+pred.2020.0.19.week <- tapply(pred.mort.0.19[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.0.19.week <- tapply(alldata$Age0.19[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.0.19.week,pch=16,xlab="Week",ylab="Mortality Ages 0-19",ylim=c(6,32))
+
+abline(v=53, lty=2)
+text(25,32,"2020",col=1)
+text(64,32,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.0.19.week,pch=16,col=3)
+
+lines(seq(1,last.week),pred.2020.0.19.week+1.96*sqrt(pred.2020.0.19.week*fit.rates.0.19.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.0.19.week-1.96*sqrt(pred.2020.0.19.week*fit.rates.0.19.q$scale),col=4)
+
+predict.1.0.19 <- sum(pred.2020.0.19.week[1:last.week])
+predict.1.0.19
+predict.1.0.19-1.96*sqrt(predict.1.0.19*fit.rates.0.19.q$scale)
+predict.1.0.19+1.96*sqrt(predict.1.0.19*fit.rates.0.19.q$scale)
+
+mortality.2020.1.0.19 <- sum(mortality.2020.0.19.week[1:last.week])
+mortality.2020.1.0.19
+
+
+predict.1.12.0.19 <- sum(pred.2020.0.19.week[1:12])
+predict.1.12.0.19
+predict.1.12.0.19-1.96*sqrt(predict.1.12.0.19*fit.rates.0.19.q$scale)
+predict.1.12.0.19+1.96*sqrt(predict.1.12.0.19*fit.rates.0.19.q$scale)
+
+mortality.2020.1.12.0.19 <- sum(mortality.2020.0.19.week[1:12])
+mortality.2020.1.12.0.19
+
+
+
+predict.13.end.0.19 <- sum(pred.2020.0.19.week[13:last.week])
+predict.13.end.0.19
+predict.13.end.0.19-1.96*sqrt(predict.13.end.0.19*fit.rates.0.19.q$scale)
+predict.13.end.0.19+1.96*sqrt(predict.13.end.0.19*fit.rates.0.19.q$scale)
+
+mortality.2020.13.end.0.19 <- sum(mortality.2020.0.19.week[13:last.week])
+mortality.2020.13.end.0.19
+
+
+predict.14.end.0.19 <- sum(pred.2020.0.19.week[14:last.week])
+predict.14.end.0.19
+predict.14.end.0.19-1.96*sqrt(predict.14.end.0.19*fit.rates.0.19.q$scale)
+predict.14.end.0.19+1.96*sqrt(predict.14.end.0.19*fit.rates.0.19.q$scale)
+
+mortality.2020.14.end.0.19 <- sum(mortality.2020.0.19.week[14:last.week])
+mortality.2020.14.end.0.19
+
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\CBS\\Mortality")
+write.csv(pred.2020.0.19.week,"pred_0_19.csv")
+
+
+```
+
+
+
+```{r}
+
+# Ages 20-59.
+
+pred.2020.20.59.week <- tapply(pred.mort.20.59[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.20.59.week <- tapply(alldata$Age20.59[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.20.59.week,pch=16,xlab="Week",ylab="Mortality Ages 20-59",ylim=c(67,130))
+
+abline(v=53, lty=2)
+text(25,128,"2020",col=1)
+text(64,128,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.20.59.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.20.59.week+1.96*sqrt(pred.2020.20.59.week*fit.rates.20.59.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.20.59.week-1.96*sqrt(pred.2020.20.59.week*fit.rates.20.59.q$scale),col=4)
+
+predict.1.end.20.59 <- sum(pred.2020.20.59.week[1:last.week])
+predict.1.end.20.59
+predict.1.end.20.59-1.96*sqrt(predict.1.end.20.59*fit.rates.20.59.q$scale)
+predict.1.end.20.59+1.96*sqrt(predict.1.end.20.59*fit.rates.20.59.q$scale)
+
+mortality.2020.1.end.20.59 <- sum(mortality.2020.20.59.week[1:last.week])
+mortality.2020.1.end.20.59
+
+
+predict.1.12.20.59 <- sum(pred.2020.20.59.week[1:12])
+predict.1.12.20.59
+predict.1.12.20.59-1.96*sqrt(predict.1.12.20.59*fit.rates.20.59.q$scale)
+predict.1.12.20.59+1.96*sqrt(predict.1.12.20.59*fit.rates.20.59.q$scale)
+
+mortality.2020.1.12.20.59 <- sum(mortality.2020.20.59.week[1:12])
+mortality.2020.1.12.20.59
+
+
+predict.13.end.20.59 <- sum(pred.2020.20.59.week[13:last.week])
+predict.13.end.20.59
+predict.13.end.20.59-1.96*sqrt(predict.13.end.20.59*fit.rates.20.59.q$scale)
+predict.13.end.20.59+1.96*sqrt(predict.13.end.20.59*fit.rates.20.59.q$scale)
+
+mortality.2020.13.end.20.59 <- sum(mortality.2020.20.59.week[13:last.week])
+mortality.2020.13.end.20.59
+
+
+predict.14.end.20.59 <- sum(pred.2020.20.59.week[14:last.week])
+predict.14.end.20.59
+predict.14.end.20.59-1.96*sqrt(predict.14.end.20.59*fit.rates.20.59.q$scale)
+predict.14.end.20.59+1.96*sqrt(predict.14.end.20.59*fit.rates.20.59.q$scale)
+
+mortality.2020.14.end.20.59 <- sum(mortality.2020.20.59.week[14:last.week])
+mortality.2020.14.end.20.59
+
+write.csv(pred.2020.20.59.week,"pred_20_59.csv")
+
+
+```
+
+
+
+```{r}
+
+# Ages 60-69.
+
+pred.2020.60.69.week <- tapply(pred.mort.60.69[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.60.69.week <- tapply(alldata$Age60.69[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.60.69.week,pch=16,xlab="Week",ylab="Mortality Ages 60-69",ylim=c(85,170))
+
+abline(v=53, lty=2)
+text(25,168,"2020",col=1)
+text(64,168,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.60.69.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.60.69.week+1.96*sqrt(pred.2020.60.69.week*fit.rates.60.69.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.60.69.week-1.96*sqrt(pred.2020.60.69.week*fit.rates.60.69.q$scale),col=4)
+
+predict.1.end.60.69 <- sum(pred.2020.60.69.week[1:last.week])
+predict.1.end.60.69
+predict.1.end.60.69-1.96*sqrt(predict.1.end.60.69*fit.rates.60.69.q$scale)
+predict.1.end.60.69+1.96*sqrt(predict.1.end.60.69*fit.rates.60.69.q$scale)
+
+mortality.2020.1.end.60.69 <- sum(mortality.2020.60.69.week[1:last.week])
+mortality.2020.1.end.60.69
+
+
+predict.1.12.60.69 <- sum(pred.2020.60.69.week[1:12])
+predict.1.12.60.69
+predict.1.12.60.69-1.96*sqrt(predict.1.12.60.69*fit.rates.60.69.q$scale)
+predict.1.12.60.69+1.96*sqrt(predict.1.12.60.69*fit.rates.60.69.q$scale)
+
+mortality.2020.1.12.60.69 <- sum(mortality.2020.60.69.week[1:12])
+mortality.2020.1.12.60.69
+
+
+predict.13.end.60.69 <- sum(pred.2020.60.69.week[13:last.week])
+predict.13.end.60.69
+predict.13.end.60.69-1.96*sqrt(predict.13.end.60.69*fit.rates.60.69.q$scale)
+predict.13.end.60.69+1.96*sqrt(predict.13.end.60.69*fit.rates.60.69.q$scale)
+
+mortality.2020.13.end.60.69 <- sum(mortality.2020.60.69.week[13:last.week])
+mortality.2020.13.end.60.69
+
+
+predict.14.end.60.69 <- sum(pred.2020.60.69.week[14:last.week])
+predict.14.end.60.69
+predict.14.end.60.69-1.96*sqrt(predict.14.end.60.69*fit.rates.60.69.q$scale)
+predict.14.end.60.69+1.96*sqrt(predict.14.end.60.69*fit.rates.60.69.q$scale)
+
+mortality.2020.14.end.60.69 <- sum(mortality.2020.60.69.week[14:last.week])
+mortality.2020.14.end.60.69
+
+write.csv(pred.2020.60.69.week,"pred_60_69.csv")
+```
+
+
+
+```{r}
+
+# Ages 70-79.
+
+pred.2020.70.79.week <- tapply(pred.mort.70.79[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.70.79.week <- tapply(alldata$Age70.79[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.70.79.week,pch=16,xlab="Week",ylab="Mortality Ages 70-79",ylim=c(140,280))
+
+abline(v=53, lty=2)
+text(25,277,"2020",col=1)
+text(64,277,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.70.79.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.70.79.week+1.96*sqrt(pred.2020.70.79.week*fit.rates.70.79.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.70.79.week-1.96*sqrt(pred.2020.70.79.week*fit.rates.70.79.q$scale),col=4)
+
+
+predict.1.end.70.79 <- sum(pred.2020.70.79.week[1:last.week])
+predict.1.end.70.79
+predict.1.end.70.79-1.96*sqrt(predict.1.end.70.79*fit.rates.70.79.q$scale)
+predict.1.end.70.79+1.96*sqrt(predict.1.end.70.79*fit.rates.70.79.q$scale)
+
+mortality.2020.1.end.70.79 <- sum(mortality.2020.70.79.week[1:last.week])
+mortality.2020.1.end.70.79
+
+
+predict.1.12.70.79 <- sum(pred.2020.70.79.week[1:12])
+predict.1.12.70.79
+predict.1.12.70.79-1.96*sqrt(predict.1.12.70.79*fit.rates.70.79.q$scale)
+predict.1.12.70.79+1.96*sqrt(predict.1.12.70.79*fit.rates.70.79.q$scale)
+
+mortality.2020.1.12.70.79 <- sum(mortality.2020.70.79.week[1:12])
+mortality.2020.1.12.70.79
+
+
+predict.13.end.70.79 <- sum(pred.2020.70.79.week[13:last.week])
+predict.13.end.70.79
+predict.13.end.70.79-1.96*sqrt(predict.13.end.70.79*fit.rates.70.79.q$scale)
+predict.13.end.70.79+1.96*sqrt(predict.13.end.70.79*fit.rates.70.79.q$scale)
+
+mortality.2020.13.end.70.79 <- sum(mortality.2020.70.79.week[13:last.week])
+mortality.2020.13.end.70.79
+
+
+predict.14.end.70.79 <- sum(pred.2020.70.79.week[14:last.week])
+predict.14.end.70.79
+predict.14.end.70.79-1.96*sqrt(predict.14.end.70.79*fit.rates.70.79.q$scale)
+predict.14.end.70.79+1.96*sqrt(predict.14.end.70.79*fit.rates.70.79.q$scale)
+
+mortality.2020.14.end.70.79 <- sum(mortality.2020.70.79.week[14:last.week])
+mortality.2020.14.end.70.79
+
+write.csv(pred.2020.70.79.week,"pred_70_79.csv")
+
+```
+
+
+
+```{r}
+
+# Ages 80-89.
+
+pred.2020.80.89.week <- tapply(pred.mort.80.89[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.80.89.week <- tapply(alldata$Age80.89[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.80.89.week,pch=16,xlab="Week",ylab="Mortality Ages 80-89",ylim=c(220,450))
+
+abline(v=53, lty=2)
+text(25,446,"2020",col=1)
+text(64,446,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.80.89.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.80.89.week+1.96*sqrt(pred.2020.80.89.week*fit.rates.80.89.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.80.89.week-1.96*sqrt(pred.2020.80.89.week*fit.rates.80.89.q$scale),col=4)
+
+
+predict.1.end.80.89 <- sum(pred.2020.80.89.week[1:last.week])
+predict.1.end.80.89
+predict.1.end.80.89-1.96*sqrt(predict.1.end.80.89*fit.rates.80.89.q$scale)
+predict.1.end.80.89+1.96*sqrt(predict.1.end.80.89*fit.rates.80.89.q$scale)
+
+mortality.2020.1.end.80.89 <- sum(mortality.2020.80.89.week[1:last.week])
+mortality.2020.1.end.80.89
+
+
+predict.1.12.80.89 <- sum(pred.2020.80.89.week[1:12])
+predict.1.12.80.89
+predict.1.12.80.89-1.96*sqrt(predict.1.12.80.89*fit.rates.80.89.q$scale)
+predict.1.12.80.89+1.96*sqrt(predict.1.12.80.89*fit.rates.80.89.q$scale)
+
+mortality.2020.1.12.80.89 <- sum(mortality.2020.80.89.week[1:12])
+mortality.2020.1.12.80.89
+
+
+
+predict.13.end.80.89 <- sum(pred.2020.80.89.week[13:last.week])
+predict.13.end.80.89
+predict.13.end.80.89-1.96*sqrt(predict.13.end.80.89*fit.rates.80.89.q$scale)
+predict.13.end.80.89+1.96*sqrt(predict.13.end.80.89*fit.rates.80.89.q$scale)
+
+mortality.2020.13.end.80.89 <- sum(mortality.2020.80.89.week[14:last.week])
+mortality.2020.13.end.80.89
+
+predict.14.end.80.89 <- sum(pred.2020.80.89.week[14:last.week])
+predict.14.end.80.89
+predict.14.end.80.89-1.96*sqrt(predict.14.end.80.89*fit.rates.80.89.q$scale)
+predict.14.end.80.89+1.96*sqrt(predict.14.end.80.89*fit.rates.80.89.q$scale)
+
+mortality.2020.14.end.80.89 <- sum(mortality.2020.80.89.week[14:last.week])
+mortality.2020.14.end.80.89
+
+write.csv(pred.2020.80.89.week,"pred_80_89.csv")
+```
+
+
+
+```{r}
+
+# Ages 90-.
+
+pred.2020.90.week <- tapply(pred.mort.90[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.90.week <- tapply(alldata$Age90[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.90.week,pch=16,xlab="Week",ylab="Mortality Ages 90-",ylim=c(140,300))
+
+abline(v=53, lty=2)
+text(25,297,"2020",col=1)
+text(64,297,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.90.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.90.week+1.96*sqrt(pred.2020.90.week*fit.rates.90.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.90.week-1.96*sqrt(pred.2020.90.week*fit.rates.90.q$scale),col=4)
+
+
+predict.1.end.90 <- sum(pred.2020.90.week[1:last.week])
+predict.1.end.90
+predict.1.end.90-1.96*sqrt(predict.1.end.90*fit.rates.90.q$scale)
+predict.1.end.90+1.96*sqrt(predict.1.end.90*fit.rates.90.q$scale)
+
+mortality.2020.1.end.90 <- sum(mortality.2020.90.week[1:last.week])
+mortality.2020.1.end.90
+
+
+predict.1.12.90 <- sum(pred.2020.90.week[1:12])
+predict.1.12.90
+predict.1.12.90-1.96*sqrt(predict.1.12.90*fit.rates.90.q$scale)
+predict.1.12.90+1.96*sqrt(predict.1.12.90*fit.rates.90.q$scale)
+
+mortality.2020.1.12.90 <- sum(mortality.2020.90.week[1:12])
+mortality.2020.1.12.90
+
+
+predict.13.end.90 <- sum(pred.2020.90.week[13:last.week])
+predict.13.end.90
+predict.13.end.90-1.96*sqrt(predict.13.end.90*fit.rates.90.q$scale)
+predict.13.end.90+1.96*sqrt(predict.13.end.90*fit.rates.90.q$scale)
+
+mortality.2020.13.end.90 <- sum(mortality.2020.90.week[13:last.week])
+mortality.2020.13.end.90
+
+
+predict.14.end.90 <- sum(pred.2020.90.week[14:last.week])
+predict.14.end.90
+predict.14.end.90-1.96*sqrt(predict.14.end.90*fit.rates.90.q$scale)
+predict.14.end.90+1.96*sqrt(predict.14.end.90*fit.rates.90.q$scale)
+
+mortality.2020.14.end.90 <- sum(mortality.2020.90.week[14:last.week])
+mortality.2020.14.end.90
+
+write.csv(pred.2020.90.week,"pred_90.csv")
+
+```
+
+
+
+```{r}
+
+# All ages
+
+Week.number <- ceiling(seq(1,7*last.week)/7)
+
+
+pred.mort.all <- pred.mort.0.19+pred.mort.20.59+pred.mort.60.69+pred.mort.70.79+pred.mort.80.89+pred.mort.90
+
+var.mort.all <- pred.mort.0.19*fit.rates.0.19.q$scale+pred.mort.20.59*fit.rates.20.59.q$scale+pred.mort.60.69*fit.rates.60.69.q$scale+pred.mort.70.79*fit.rates.70.79.q$scale+pred.mort.80.89*fit.rates.80.89.q$scale+pred.mort.90*fit.rates.90.q$scale
+
+
+pred.2020.all.week <- tapply(pred.mort.all[start.pred:stop.pred], Week.number,sum)
+
+var.2020.all.week <- tapply(var.mort.all[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.all.week <- tapply(alldata$Total[start.mort:stop.mort], Week.number[1:(last.week*7)],sum)
+
+plot(seq(1:last.week),mortality.2020.all.week,pch=16,xlab="Week",ylab="Total Mortality",ylim=c(740,1300))
+
+abline(v=53, lty=2)
+text(25,1295,"2020",col=1)
+text(64,1295,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.all.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.all.week+1.96*sqrt(var.2020.all.week),col=4)
+
+lines(seq(1,last.week),pred.2020.all.week-1.96*sqrt(var.2020.all.week),col=4)
+
+
+predict.1.end.all <- sum(pred.2020.all.week[1:last.week])
+predict.1.end.all
+
+var.1.end.all <- sum(var.2020.all.week[1:last.week])
+predict.1.end.all-1.96*sqrt(var.1.end.all)
+predict.1.end.all+1.96*sqrt(var.1.end.all)
+
+print(sum(mortality.2020.all.week))
+
+
+print("During the pre-covid-19 period")
+
+predict.1.12.all <- sum(pred.2020.all.week[1:12])
+predict.1.12.all
+var.1.12.all <- sum(var.2020.all.week[1:12])
+
+predict.1.12.all-1.96*sqrt(var.1.12.all)
+predict.1.12.all+1.96*sqrt(var.1.12.all)
+
+print(sum(mortality.2020.all.week[1:12]))
+
+
+print("During the covid-19 period")
+predict.13.end.all <- sum(pred.2020.all.week[13:last.week])
+predict.13.end.all
+var.13.end.all <- sum(var.2020.all.week[13:last.week])
+
+predict.13.end.all-1.96*sqrt(var.13.end.all)
+predict.13.end.all+1.96*sqrt(var.13.end.all)
+
+print(sum(mortality.2020.all.week[13:last.week]))
+
+
+predict.14.end.all <- sum(pred.2020.all.week[14:last.week])
+predict.14.end.all
+var.14.end.all <- sum(var.2020.all.week[14:last.week])
+
+predict.14.end.all-1.96*sqrt(var.14.end.all)
+predict.14.end.all+1.96*sqrt(var.14.end.all)
+
+print(sum(mortality.2020.all.week[14:last.week]))
+
+write.csv(pred.2020.all.week,"pred_all.csv")
+
+
+```
+Comparison of daily excess mortality to lagged morbidity index
+==============================================================
+
+```{r}
+
+# Compute the excess on a daily basis.  This could be either the absolute difference or the log of the ratio.  
+
+# Compare the excess to a lagged version of the morbidity index.  The relationships could be different for the three disease waves.
+
+last.week <- 57
+
+start.pred <- 7304
+stop.pred <- 7304+7*last.week-1
+
+start.mort <- 7304
+stop.mort <- 7304+7*last.week-1
+
+
+excess.abs <- alldata$Total[start.mort:stop.mort]-pred.mort.all[start.mort:stop.mort]
+
+excess.ratio <- alldata$Total[start.mort:stop.mort]/pred.mort.all[start.mort:stop.mort]
+
+index.cor <- matrix(rep(0,48),ncol=2)
+
+for (i in 1:24){
+  index.cor[i,1] <- cor(cbind(covid.cases$index.smooth[4:(309-i)],excess.ratio[(63+i):368]))[1,2]
+  index.cor[i,2] <- cor(cbind(covid.cases$index2.smooth[4:(309-i)],excess.ratio[(63+i):368]))[1,2]  
+}
+
+print(index.cor)
+
+plot(covid.cases$index2.smooth[4:(309-4)],excess.ratio[(63+4):368],pch=16,xlab="COVID Mortality Index 11 Days Earlier",ylab="Excess Mortality Ratio")
+```
+
+
+
+forecasts of deaths for 2019 -- model check
+===========================================
+```{r}
+
+# The "official" first week of 2019 begins on 31 Dec 2018.  So these results will relate to the predictions for all those days.  A necessary first step is to set up a variable that has length equal to the number of days of predictions (here 31 Dec 2018 thru 29 Dec 2019) and divides them into groups of 7 for defining successive official weeks.  
+
+# The following two variables give the start and stop day for computing forecasts, in terms of row in the data file.  For 2019, the first day is 31 Dec 2018, which corresponds to row 6940.
+
+# Predictions are computed for epidemiological weeks 1 through last.week of 2019.  The variable last.week is defined in the code.
+
+last.week <- 52
+
+start.pred <- 6940
+stop.pred <- 6940+7*last.week-1
+
+# Actual mortality is also computed for each week using the above rows.  However, in some cases we may have actual data at the weekly level but not yet at the daily level.  In that case, the actual mortality will be computed from our data file up to the last week for which we have complete daily data.  The weekly death counts for additional weeks will be added "manually" to the mortality.week vectors.  The following two variables give the limits for computing actual mortality from the daily data.
+
+start.mort <- 6940
+stop.mort <- 6940+7*last.week-1
+
+
+Week.number <- ceiling(seq(1,7*last.week)/7)
+
+# Ages 0-19.
+
+pred.2019.0.19.week <- tapply(pred.mort.0.19[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.0.19.week <- tapply(alldata$Age0.19[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.0.19.week,pch=16,xlab="Week",ylab="Mortality Ages 0-19",ylim=c(6,32))
+
+points(seq(1:last.week),pred.2019.0.19.week,pch=16,col=3)
+
+lines(seq(1,last.week),pred.2019.0.19.week+1.96*sqrt(pred.2019.0.19.week),col=4)
+
+lines(seq(1,last.week),pred.2019.0.19.week-1.96*sqrt(pred.2019.0.19.week),col=4)
+
+predict.1.0.19 <- sum(pred.2019.0.19.week[1:last.week])
+predict.1.0.19
+predict.1.0.19-1.96*sqrt(predict.1.0.19)
+predict.1.0.19+1.96*sqrt(predict.1.0.19)
+
+mortality.2019.1.0.19 <- sum(mortality.2019.0.19.week[1:last.week])
+mortality.2019.1.0.19
+
+
+```
+
+```{r}
+
+# Ages 20-59.
+
+pred.2019.20.59.week <- tapply(pred.mort.20.59[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.20.59.week <- tapply(alldata$Age20.59[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.20.59.week,pch=16,xlab="Week",ylab="Mortality Ages 20-59",ylim=c(67,120))
+
+points(seq(1:last.week),pred.2019.20.59.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2019.20.59.week+1.96*sqrt(pred.2019.20.59.week),col=4)
+
+lines(seq(1,last.week),pred.2019.20.59.week-1.96*sqrt(pred.2019.20.59.week),col=4)
+
+predict.1.end.20.59 <- sum(pred.2019.20.59.week[1:last.week])
+predict.1.end.20.59
+predict.1.end.20.59-1.96*sqrt(predict.1.end.20.59)
+predict.1.end.20.59+1.96*sqrt(predict.1.end.20.59)
+
+mortality.2019.1.end.20.59 <- sum(mortality.2019.20.59.week[1:last.week])
+mortality.2019.1.end.20.59
+
+
+```
+
+
+```{r}
+
+# Ages 60-69.
+
+pred.2019.60.69.week <- tapply(pred.mort.60.69[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.60.69.week <- tapply(alldata$Age60.69[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.60.69.week,pch=16,xlab="Week",ylab="Mortality Ages 60-69",ylim=c(85,160))
+
+points(seq(1:last.week),pred.2019.60.69.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2019.60.69.week+1.96*sqrt(pred.2019.60.69.week),col=4)
+
+lines(seq(1,last.week),pred.2019.60.69.week-1.96*sqrt(pred.2019.60.69.week),col=4)
+
+predict.1.end.60.69 <- sum(pred.2019.60.69.week[1:last.week])
+predict.1.end.60.69
+predict.1.end.60.69-1.96*sqrt(predict.1.end.60.69)
+predict.1.end.60.69+1.96*sqrt(predict.1.end.60.69)
+
+mortality.2019.1.end.60.69 <- sum(mortality.2019.60.69.week[1:last.week])
+mortality.2019.1.end.60.69
+
+```
+
+
+```{r}
+
+# Ages 70-79.
+
+pred.2019.70.79.week <- tapply(pred.mort.70.79[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.70.79.week <- tapply(alldata$Age70.79[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.70.79.week,pch=16,xlab="Week",ylab="Mortality Ages 70-79",ylim=c(140,260))
+
+points(seq(1:last.week),pred.2019.70.79.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2019.70.79.week+1.96*sqrt(pred.2019.70.79.week),col=4)
+
+lines(seq(1,last.week),pred.2019.70.79.week-1.96*sqrt(pred.2019.70.79.week),col=4)
+
+
+predict.1.end.70.79 <- sum(pred.2019.70.79.week[1:last.week])
+predict.1.end.70.79
+predict.1.end.70.79-1.96*sqrt(predict.1.end.70.79)
+predict.1.end.70.79+1.96*sqrt(predict.1.end.70.79)
+
+mortality.2019.1.end.70.79 <- sum(mortality.2019.70.79.week[1:last.week])
+mortality.2019.1.end.70.79
+
+```
+
+
+```{r}
+
+# Ages 80-89.
+
+pred.2019.80.89.week <- tapply(pred.mort.80.89[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.80.89.week <- tapply(alldata$Age80.89[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.80.89.week,pch=16,xlab="Week",ylab="Mortality Ages 80-89",ylim=c(220,420))
+
+points(seq(1:last.week),pred.2019.80.89.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2019.80.89.week+1.96*sqrt(pred.2019.80.89.week),col=4)
+
+lines(seq(1,last.week),pred.2019.80.89.week-1.96*sqrt(pred.2019.80.89.week),col=4)
+
+
+predict.1.end.80.89 <- sum(pred.2019.80.89.week[1:last.week])
+predict.1.end.80.89
+predict.1.end.80.89-1.96*sqrt(predict.1.end.80.89)
+predict.1.end.80.89+1.96*sqrt(predict.1.end.80.89)
+
+mortality.2019.1.end.80.89 <- sum(mortality.2019.80.89.week[1:last.week])
+mortality.2019.1.end.80.89
+
+```
+
+
+
+```{r}
+
+# Ages 90-.
+
+pred.2019.90.week <- tapply(pred.mort.90[start.pred:stop.pred], Week.number,sum)
+
+mortality.2019.90.week <- tapply(alldata$Age90[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2019.90.week,pch=16,xlab="Week",ylab="Mortality Ages 90-",ylim=c(140,280))
+
+points(seq(1:last.week),pred.2019.90.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2019.90.week+1.96*sqrt(pred.2019.90.week),col=4)
+
+lines(seq(1,last.week),pred.2019.90.week-1.96*sqrt(pred.2019.90.week),col=4)
+
+
+predict.1.end.90 <- sum(pred.2019.90.week[1:last.week])
+predict.1.end.90
+predict.1.end.90-1.96*sqrt(predict.1.end.90)
+predict.1.end.90+1.96*sqrt(predict.1.end.90)
+
+mortality.2019.1.end.90 <- sum(mortality.2019.90.week[1:last.week])
+mortality.2019.1.end.90
+
+
+```
+
+
+Models and Expected Mortality Dropping the Effect of ILI
+
+Fits without ILI by age group:  0-19
+====================================
+```{r}
+
+
+
+# quasi-Poisson fit.
+
+fit.rates.0.19.q.noflu <- gam(Age0.19 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG1), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.0.19.q.noflu)
+plot.gam(fit.rates.0.19.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.0.19.noflu <- predict(fit.rates.0.19.q.noflu,alldata,se.fit = TRUE)
+pred.mort.0.19.noflu <- exp(pred.0.19.noflu$fit)*alldata$populationPredG1
+
+
+```
+
+
+Fits without ILI by age group:  20-59
+=====================================
+```{r}
+
+fit.rates.20.59.q.noflu <- gam(Age20.59 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG2), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.20.59.q.noflu)
+plot.gam(fit.rates.20.59.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.20.59.noflu<- predict(fit.rates.20.59.q.noflu,alldata)
+pred.mort.20.59.noflu <- exp(pred.20.59.noflu)*alldata$populationPredG2
+
+```
+
+
+Fits without ILI by age group: 60-69
+==================================== 
+
+```{r}
+
+fit.rates.60.69.q.noflu <- gam(Age60.69 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG3), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.60.69.q.noflu)
+plot.gam(fit.rates.60.69.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.60.69.noflu <- predict(fit.rates.60.69.q.noflu,alldata)
+pred.mort.60.69.noflu <- exp(pred.60.69.noflu)*alldata$populationPredG3
+```
+
+
+
+Fits without ILI by age group:  70-79
+=====================================  
+
+```{r}
+
+fit.rates.70.79.q.noflu <- gam(Age70.79 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG4), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.70.79.q.noflu)
+plot.gam(fit.rates.70.79.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.70.79.noflu <- predict(fit.rates.70.79.q.noflu,alldata)
+pred.mort.70.79.noflu <- exp(pred.70.79.noflu)*alldata$populationPredG4
+```
+
+
+Fits without ILI by age group:  80-89
+=====================================    
+
+```{r}
+
+fit.rates.80.89.q.noflu <- gam(Age80.89 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Year.fit.2010+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG5), data=alldata, subset = (Year<2020))
+
+summary(fit.rates.80.89.q.noflu)
+plot.gam(fit.rates.80.89.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.80.89.noflu <- predict(fit.rates.80.89.q.noflu,alldata)
+pred.mort.80.89.noflu <- exp(pred.80.89.noflu)*alldata$populationPredG5
+```
+
+
+Fits without ILI by age group:  90-
+=====================================  
+```{r}
+
+fit.rates.90.q.noflu <- gam(Age90 ~ s(DayCnt,bs="cc")+factor(Day)+Year.fit+Temp.max.summer.1.10+Temp.max.fall.1.10+Temp.max.winter.1.10+Temp.max.spring.1.10+Temp.min.summer.1.10+Temp.min.fall.1.10+Temp.min.winter.1.10+Temp.min.spring.1.10+TD3.summer.1.10+TD3.fall.1.10+TD3.winter.1.10+TD3.spring.1.10+RadAvg.summer.1.10+RadAvg.fall.1.10+RadAvg.winter.1.10+RadAvg.spring.1.10, family = quasipoisson, offset = log(populationPredG6), data=alldata, subset = ((Year<2020)&(Year>2008)))
+
+summary(fit.rates.90.q.noflu)
+plot.gam(fit.rates.90.q.noflu,rug=FALSE,xlab="Day",ylab="Annual Trend")
+
+pred.90.noflu <- predict(fit.rates.90.q.noflu,alldata)
+pred.mort.90.noflu <- exp(pred.90.noflu)*alldata$populationPredG6
+```
+
+
+
+forecasts of deaths for 2020 and 2021 with no ILI adjustment
+============================================================
+```{r}
+
+# The "official" first week of 2020 begins on 30 Dec 2019.  So these results will relate to the predictions for all those days.  A necessary first step is to set up a variable that has length equal to the number of days of predictions and divides them into groups of 7 for defining successive official weeks.  As of 1 Sept, we have 185 days of predictions, which gives us 26 weeks, with 3 days at the end waiting for completion to a week.
+
+# The following two variables give the start and stop day for computing forecasts, in terms of row in the data file.  For 2020, the first day is 30 Dec 2019, which corresponds to row 7304.
+
+# Predictions are computed for epidemiological weeks 1 of 2020 through week 12 of 2021 (28 March).  The variable last.week is defined in the code.
+
+last.week <- 65
+
+start.pred <- 7304
+stop.pred <- 7304+7*last.week-1
+
+# Actual mortality is also computed for each week using the above rows.  However, in some cases we may have actual data at the weekly level but not yet at the daily level.  In that case, the actual mortality will be computed from our data file up to the last week for which we have complete daily data.  The weekly death counts for additional weeks will be added "manually" to the mortality.week vectors.  The following two variables give the limits for computing actual mortality from the daily data.
+
+start.mort <- 7304
+stop.mort <- 7304+7*last.week-1
+
+
+Week.number <- ceiling(seq(1,7*last.week)/7)
+
+# Ages 0-19.
+
+pred.2020.0.19.week <- tapply(pred.mort.0.19.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.0.19.week <- tapply(alldata$Age0.19[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.0.19.week,pch=16,xlab="Week",ylab="Mortality Ages 0-19",ylim=c(6,32))
+
+abline(v=53, lty=2)
+text(25,32,"2020",col=1)
+text(64,32,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.0.19.week,pch=16,col=3)
+
+lines(seq(1,last.week),pred.2020.0.19.week+1.96*sqrt(pred.2020.0.19.week*fit.rates.0.19.q$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.0.19.week-1.96*sqrt(pred.2020.0.19.week*fit.rates.0.19.q$scale),col=4)
+
+predict.1.0.19 <- sum(pred.2020.0.19.week[1:last.week])
+predict.1.0.19
+predict.1.0.19-1.96*sqrt(predict.1.0.19*fit.rates.0.19.q.noflu$scale)
+predict.1.0.19+1.96*sqrt(predict.1.0.19*fit.rates.0.19.q.noflu$scale)
+
+mortality.2020.1.0.19 <- sum(mortality.2020.0.19.week[1:last.week])
+mortality.2020.1.0.19
+
+
+predict.1.12.0.19 <- sum(pred.2020.0.19.week[1:12])
+predict.1.12.0.19
+predict.1.12.0.19-1.96*sqrt(predict.1.12.0.19*fit.rates.0.19.q.noflu$scale)
+predict.1.12.0.19+1.96*sqrt(predict.1.12.0.19*fit.rates.0.19.q.noflu$scale)
+
+mortality.2020.1.12.0.19 <- sum(mortality.2020.0.19.week[1:12])
+mortality.2020.1.12.0.19
+
+
+
+predict.13.end.0.19 <- sum(pred.2020.0.19.week[13:last.week])
+predict.13.end.0.19
+predict.13.end.0.19-1.96*sqrt(predict.13.end.0.19*fit.rates.0.19.q.noflu$scale)
+predict.13.end.0.19+1.96*sqrt(predict.13.end.0.19*fit.rates.0.19.q.noflu$scale)
+
+mortality.2020.13.end.0.19 <- sum(mortality.2020.0.19.week[13:last.week])
+mortality.2020.13.end.0.19
+
+
+predict.14.end.0.19 <- sum(pred.2020.0.19.week[14:last.week])
+predict.14.end.0.19
+predict.14.end.0.19-1.96*sqrt(predict.14.end.0.19*fit.rates.0.19.q.noflu$scale)
+predict.14.end.0.19+1.96*sqrt(predict.14.end.0.19*fit.rates.0.19.q.noflu$scale)
+
+mortality.2020.14.end.0.19 <- sum(mortality.2020.0.19.week[14:last.week])
+mortality.2020.14.end.0.19
+
+
+setwd("C:\\Users//DMS\\Documents\\Biostat\\Covid-19\\Climate and covid-19\\Data\\CBS\\Mortality")
+write.csv(pred.2020.0.19.week,"pred_0_19_noflu.csv")
+
+```
+
+
+
+```{r}
+
+# Ages 20-59.
+
+pred.2020.20.59.week <- tapply(pred.mort.20.59.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.20.59.week <- tapply(alldata$Age20.59[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.20.59.week,pch=16,xlab="Week",ylab="Mortality Ages 20-59",ylim=c(67,130))
+
+abline(v=53, lty=2)
+text(25,128,"2020",col=1)
+text(64,128,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.20.59.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.20.59.week+1.96*sqrt(pred.2020.20.59.week*fit.rates.20.59.q.noflu$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.20.59.week-1.96*sqrt(pred.2020.20.59.week*fit.rates.20.59.q.noflu$scale),col=4)
+
+predict.1.end.20.59 <- sum(pred.2020.20.59.week[1:last.week])
+predict.1.end.20.59
+predict.1.end.20.59-1.96*sqrt(predict.1.end.20.59*fit.rates.20.59.q.noflu$scale)
+predict.1.end.20.59+1.96*sqrt(predict.1.end.20.59*fit.rates.20.59.q.noflu$scale)
+
+mortality.2020.1.end.20.59 <- sum(mortality.2020.20.59.week[1:last.week])
+mortality.2020.1.end.20.59
+
+
+predict.1.12.20.59 <- sum(pred.2020.20.59.week[1:12])
+predict.1.12.20.59
+predict.1.12.20.59-1.96*sqrt(predict.1.12.20.59*fit.rates.20.59.q.noflu$scale)
+predict.1.12.20.59+1.96*sqrt(predict.1.12.20.59*fit.rates.20.59.q.noflu$scale)
+
+mortality.2020.1.12.20.59 <- sum(mortality.2020.20.59.week[1:12])
+mortality.2020.1.12.20.59
+
+
+predict.13.end.20.59 <- sum(pred.2020.20.59.week[13:last.week])
+predict.13.end.20.59
+predict.13.end.20.59-1.96*sqrt(predict.13.end.20.59*fit.rates.20.59.q.noflu$scale)
+predict.13.end.20.59+1.96*sqrt(predict.13.end.20.59*fit.rates.20.59.q.noflu$scale)
+
+mortality.2020.13.end.20.59 <- sum(mortality.2020.20.59.week[13:last.week])
+mortality.2020.13.end.20.59
+
+
+predict.14.end.20.59 <- sum(pred.2020.20.59.week[14:last.week])
+predict.14.end.20.59
+predict.14.end.20.59-1.96*sqrt(predict.14.end.20.59*fit.rates.20.59.q.noflu$scale)
+predict.14.end.20.59+1.96*sqrt(predict.14.end.20.59*fit.rates.20.59.q.noflu$scale)
+
+mortality.2020.14.end.20.59 <- sum(mortality.2020.20.59.week[14:last.week])
+mortality.2020.14.end.20.59
+
+write.csv(pred.2020.20.59.week,"pred_20_59_noflu.csv")
+
+
+```
+
+
+
+```{r}
+
+# Ages 60-69.
+
+pred.2020.60.69.week <- tapply(pred.mort.60.69.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.60.69.week <- tapply(alldata$Age60.69[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.60.69.week,pch=16,xlab="Week",ylab="Mortality Ages 60-69",ylim=c(85,170))
+
+abline(v=53, lty=2)
+text(25,168,"2020",col=1)
+text(64,168,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.60.69.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.60.69.week+1.96*sqrt(pred.2020.60.69.week*fit.rates.60.69.q.noflu$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.60.69.week-1.96*sqrt(pred.2020.60.69.week*fit.rates.60.69.q.noflu$scale),col=4)
+
+predict.1.end.60.69 <- sum(pred.2020.60.69.week[1:last.week])
+predict.1.end.60.69
+predict.1.end.60.69-1.96*sqrt(predict.1.end.60.69*fit.rates.60.69.q.noflu$scale)
+predict.1.end.60.69+1.96*sqrt(predict.1.end.60.69*fit.rates.60.69.q.noflu$scale)
+
+mortality.2020.1.end.60.69 <- sum(mortality.2020.60.69.week[1:last.week])
+mortality.2020.1.end.60.69
+
+
+predict.1.12.60.69 <- sum(pred.2020.60.69.week[1:12])
+predict.1.12.60.69
+predict.1.12.60.69-1.96*sqrt(predict.1.12.60.69*fit.rates.60.69.q.noflu$scale)
+predict.1.12.60.69+1.96*sqrt(predict.1.12.60.69*fit.rates.60.69.q.noflu$scale)
+
+mortality.2020.1.12.60.69 <- sum(mortality.2020.60.69.week[1:12])
+mortality.2020.1.12.60.69
+
+
+predict.13.end.60.69 <- sum(pred.2020.60.69.week[13:last.week])
+predict.13.end.60.69
+predict.13.end.60.69-1.96*sqrt(predict.13.end.60.69*fit.rates.60.69.q.noflu$scale)
+predict.13.end.60.69+1.96*sqrt(predict.13.end.60.69*fit.rates.60.69.q.noflu$scale)
+
+mortality.2020.13.end.60.69 <- sum(mortality.2020.60.69.week[13:last.week])
+mortality.2020.13.end.60.69
+
+
+predict.14.end.60.69 <- sum(pred.2020.60.69.week[14:last.week])
+predict.14.end.60.69
+predict.14.end.60.69-1.96*sqrt(predict.14.end.60.69*fit.rates.60.69.q.noflu$scale)
+predict.14.end.60.69+1.96*sqrt(predict.14.end.60.69*fit.rates.60.69.q.noflu$scale)
+
+mortality.2020.14.end.60.69 <- sum(mortality.2020.60.69.week[14:last.week])
+mortality.2020.14.end.60.69
+
+write.csv(pred.2020.60.69.week,"pred_60_69_noflu.csv")
+```
+
+
+
+```{r}
+
+# Ages 70-79.
+
+pred.2020.70.79.week <- tapply(pred.mort.70.79.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.70.79.week <- tapply(alldata$Age70.79[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.70.79.week,pch=16,xlab="Week",ylab="Mortality Ages 70-79",ylim=c(140,280))
+
+abline(v=53, lty=2)
+text(25,277,"2020",col=1)
+text(64,277,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.70.79.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.70.79.week+1.96*sqrt(pred.2020.70.79.week*fit.rates.70.79.q.noflu$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.70.79.week-1.96*sqrt(pred.2020.70.79.week*fit.rates.70.79.q.noflu$scale),col=4)
+
+
+predict.1.end.70.79 <- sum(pred.2020.70.79.week[1:last.week])
+predict.1.end.70.79
+predict.1.end.70.79-1.96*sqrt(predict.1.end.70.79*fit.rates.70.79.q.noflu$scale)
+predict.1.end.70.79+1.96*sqrt(predict.1.end.70.79*fit.rates.70.79.q.noflu$scale)
+
+mortality.2020.1.end.70.79 <- sum(mortality.2020.70.79.week[1:last.week])
+mortality.2020.1.end.70.79
+
+
+predict.1.12.70.79 <- sum(pred.2020.70.79.week[1:12])
+predict.1.12.70.79
+predict.1.12.70.79-1.96*sqrt(predict.1.12.70.79*fit.rates.70.79.q.noflu$scale)
+predict.1.12.70.79+1.96*sqrt(predict.1.12.70.79*fit.rates.70.79.q.noflu$scale)
+
+mortality.2020.1.12.70.79 <- sum(mortality.2020.70.79.week[1:12])
+mortality.2020.1.12.70.79
+
+
+predict.13.end.70.79 <- sum(pred.2020.70.79.week[13:last.week])
+predict.13.end.70.79
+predict.13.end.70.79-1.96*sqrt(predict.13.end.70.79*fit.rates.70.79.q.noflu$scale)
+predict.13.end.70.79+1.96*sqrt(predict.13.end.70.79*fit.rates.70.79.q.noflu$scale)
+
+mortality.2020.13.end.70.79 <- sum(mortality.2020.70.79.week[13:last.week])
+mortality.2020.13.end.70.79
+
+
+predict.14.end.70.79 <- sum(pred.2020.70.79.week[14:last.week])
+predict.14.end.70.79
+predict.14.end.70.79-1.96*sqrt(predict.14.end.70.79*fit.rates.70.79.q.noflu$scale)
+predict.14.end.70.79+1.96*sqrt(predict.14.end.70.79*fit.rates.70.79.q.noflu$scale)
+
+mortality.2020.14.end.70.79 <- sum(mortality.2020.70.79.week[14:last.week])
+mortality.2020.14.end.70.79
+
+write.csv(pred.2020.70.79.week,"pred_70_79_noflu.csv")
+
+```
+
+
+
+```{r}
+
+# Ages 80-89.
+
+pred.2020.80.89.week <- tapply(pred.mort.80.89.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.80.89.week <- tapply(alldata$Age80.89[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.80.89.week,pch=16,xlab="Week",ylab="Mortality Ages 80-89",ylim=c(220,450))
+
+abline(v=53, lty=2)
+text(25,446,"2020",col=1)
+text(64,446,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.80.89.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.80.89.week+1.96*sqrt(pred.2020.80.89.week*fit.rates.80.89.q.noflu$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.80.89.week-1.96*sqrt(pred.2020.80.89.week*fit.rates.80.89.q.noflu$scale),col=4)
+
+
+predict.1.end.80.89 <- sum(pred.2020.80.89.week[1:last.week])
+predict.1.end.80.89
+predict.1.end.80.89-1.96*sqrt(predict.1.end.80.89*fit.rates.80.89.q.noflu$scale)
+predict.1.end.80.89+1.96*sqrt(predict.1.end.80.89*fit.rates.80.89.q.noflu$scale)
+
+mortality.2020.1.end.80.89 <- sum(mortality.2020.80.89.week[1:last.week])
+mortality.2020.1.end.80.89
+
+
+predict.1.12.80.89 <- sum(pred.2020.80.89.week[1:12])
+predict.1.12.80.89
+predict.1.12.80.89-1.96*sqrt(predict.1.12.80.89*fit.rates.80.89.q.noflu$scale)
+predict.1.12.80.89+1.96*sqrt(predict.1.12.80.89*fit.rates.80.89.q.noflu$scale)
+
+mortality.2020.1.12.80.89 <- sum(mortality.2020.80.89.week[1:12])
+mortality.2020.1.12.80.89
+
+
+
+predict.13.end.80.89 <- sum(pred.2020.80.89.week[13:last.week])
+predict.13.end.80.89
+predict.13.end.80.89-1.96*sqrt(predict.13.end.80.89*fit.rates.80.89.q.noflu$scale)
+predict.13.end.80.89+1.96*sqrt(predict.13.end.80.89*fit.rates.80.89.q.noflu$scale)
+
+mortality.2020.13.end.80.89 <- sum(mortality.2020.80.89.week[14:last.week])
+mortality.2020.13.end.80.89
+
+predict.14.end.80.89 <- sum(pred.2020.80.89.week[14:last.week])
+predict.14.end.80.89
+predict.14.end.80.89-1.96*sqrt(predict.14.end.80.89*fit.rates.80.89.q.noflu$scale)
+predict.14.end.80.89+1.96*sqrt(predict.14.end.80.89*fit.rates.80.89.q.noflu$scale)
+
+mortality.2020.14.end.80.89 <- sum(mortality.2020.80.89.week[14:last.week])
+mortality.2020.14.end.80.89
+
+write.csv(pred.2020.80.89.week,"pred_80_89_noflu.csv")
+```
+
+
+
+```{r}
+
+# Ages 90-.
+
+pred.2020.90.week <- tapply(pred.mort.90.noflu[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.90.week <- tapply(alldata$Age90[start.mort:stop.mort], Week.number,sum)
+
+plot(seq(1:last.week),mortality.2020.90.week,pch=16,xlab="Week",ylab="Mortality Ages 90-",ylim=c(140,300))
+
+abline(v=53, lty=2)
+text(25,297,"2020",col=1)
+text(64,297,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.90.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.90.week+1.96*sqrt(pred.2020.90.week*fit.rates.90.q.noflu$scale),col=4)
+
+lines(seq(1,last.week),pred.2020.90.week-1.96*sqrt(pred.2020.90.week*fit.rates.90.q.noflu$scale),col=4)
+
+
+predict.1.end.90 <- sum(pred.2020.90.week[1:last.week])
+predict.1.end.90
+predict.1.end.90-1.96*sqrt(predict.1.end.90*fit.rates.90.q.noflu$scale)
+predict.1.end.90+1.96*sqrt(predict.1.end.90*fit.rates.90.q.noflu$scale)
+
+mortality.2020.1.end.90 <- sum(mortality.2020.90.week[1:last.week])
+mortality.2020.1.end.90
+
+
+predict.1.12.90 <- sum(pred.2020.90.week[1:12])
+predict.1.12.90
+predict.1.12.90-1.96*sqrt(predict.1.12.90*fit.rates.90.q.noflu$scale)
+predict.1.12.90+1.96*sqrt(predict.1.12.90*fit.rates.90.q.noflu$scale)
+
+mortality.2020.1.12.90 <- sum(mortality.2020.90.week[1:12])
+mortality.2020.1.12.90
+
+
+predict.13.end.90 <- sum(pred.2020.90.week[13:last.week])
+predict.13.end.90
+predict.13.end.90-1.96*sqrt(predict.13.end.90*fit.rates.90.q.noflu$scale)
+predict.13.end.90+1.96*sqrt(predict.13.end.90*fit.rates.90.q.noflu$scale)
+
+mortality.2020.13.end.90 <- sum(mortality.2020.90.week[13:last.week])
+mortality.2020.13.end.90
+
+
+predict.14.end.90 <- sum(pred.2020.90.week[14:last.week])
+predict.14.end.90
+predict.14.end.90-1.96*sqrt(predict.14.end.90*fit.rates.90.q.noflu$scale)
+predict.14.end.90+1.96*sqrt(predict.14.end.90*fit.rates.90.q.noflu$scale)
+
+mortality.2020.14.end.90 <- sum(mortality.2020.90.week[14:last.week])
+mortality.2020.14.end.90
+
+write.csv(pred.2020.90.week,"pred_90_noflu.csv")
+
+```
+
+
+
+```{r}
+
+# All ages
+
+
+Week.number <- ceiling(seq(1,7*last.week)/7)
+
+
+pred.mort.all.noflu <- pred.mort.0.19.noflu+pred.mort.20.59.noflu+pred.mort.60.69.noflu+pred.mort.70.79.noflu+pred.mort.80.89.noflu+pred.mort.90.noflu
+
+var.mort.all <- pred.mort.0.19.noflu*fit.rates.0.19.q.noflu$scale+pred.mort.20.59.noflu*fit.rates.20.59.q.noflu$scale+pred.mort.60.69.noflu*fit.rates.60.69.q.noflu$scale+pred.mort.70.79.noflu*fit.rates.70.79.q.noflu$scale+pred.mort.80.89.noflu*fit.rates.80.89.q.noflu$scale+pred.mort.90.noflu*fit.rates.90.q.noflu$scale
+
+
+pred.2020.all.week <- tapply(pred.mort.all.noflu[start.pred:stop.pred], Week.number,sum)
+
+var.2020.all.week <- tapply(var.mort.all[start.pred:stop.pred], Week.number,sum)
+
+mortality.2020.all.week <- tapply(alldata$Total[start.mort:stop.mort], Week.number[1:(last.week*7)],sum)
+
+plot(seq(1:last.week),mortality.2020.all.week,pch=16,xlab="Week",ylab="Total Mortality",ylim=c(740,1300))
+
+abline(v=53, lty=2)
+text(25,1295,"2020",col=1)
+text(64,1295,"2021",col=1)
+
+points(seq(1:last.week),pred.2020.all.week,pch=16,col=3)
+
+
+lines(seq(1,last.week),pred.2020.all.week+1.96*sqrt(var.2020.all.week),col=4)
+
+lines(seq(1,last.week),pred.2020.all.week-1.96*sqrt(var.2020.all.week),col=4)
+
+
+predict.1.end.all <- sum(pred.2020.all.week[1:last.week])
+predict.1.end.all
+
+var.1.end.all <- sum(var.2020.all.week[1:last.week])
+predict.1.end.all-1.96*sqrt(var.1.end.all)
+predict.1.end.all+1.96*sqrt(var.1.end.all)
+
+print(sum(mortality.2020.all.week))
+
+
+print("During the pre-covid-19 period")
+
+predict.1.12.all <- sum(pred.2020.all.week[1:12])
+predict.1.12.all
+var.1.12.all <- sum(var.2020.all.week[1:12])
+
+predict.1.12.all-1.96*sqrt(var.1.12.all)
+predict.1.12.all+1.96*sqrt(var.1.12.all)
+
+print(sum(mortality.2020.all.week[1:12]))
+
+
+print("During the covid-19 period")
+predict.13.end.all <- sum(pred.2020.all.week[13:last.week])
+predict.13.end.all
+var.13.end.all <- sum(var.2020.all.week[13:last.week])
+
+predict.13.end.all-1.96*sqrt(var.13.end.all)
+predict.13.end.all+1.96*sqrt(var.13.end.all)
+
+print(sum(mortality.2020.all.week[13:last.week]))
+
+
+predict.14.end.all <- sum(pred.2020.all.week[14:last.week])
+predict.14.end.all
+var.14.end.all <- sum(var.2020.all.week[14:last.week])
+
+predict.14.end.all-1.96*sqrt(var.14.end.all)
+predict.14.end.all+1.96*sqrt(var.14.end.all)
+
+print(sum(mortality.2020.all.week[14:last.week]))
+
+write.csv(pred.2020.all.week,"pred_all_noflu.csv")
+
+
+```
